@@ -240,7 +240,7 @@ async def inline_query_handler(query: types.InlineQuery):
     results = [
         InlineQueryResultArticle(
             id=str(uuid.uuid4()),
-            title=f"отправить счёт на {amount} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji>",
+            title=f"отправить счёт на {amount} stars",
             description="нажмите чтобы создать и отправить счёт пользователю",
             input_message_content=InputTextMessageContent(message_text=text, parse_mode="HTML"),
             reply_markup=kb.as_markup(),
