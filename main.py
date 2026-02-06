@@ -8,6 +8,7 @@ import uuid
 import os
 from contextlib import suppress
 
+# Если ошибка возникает здесь, значит нужно установить библиотеку: pip install asyncpg
 import asyncpg
 
 from aiogram import Bot, Dispatcher, F, Router, types
@@ -27,8 +28,7 @@ CONFETTI_EFFECT_ID = "5046509860389126442"
 CODE_LENGTH = 4
 MIN_WITHDRAWAL_RUB = 10 
 
-# Эмодзи (используем стандартные или ваши кастомные id)
-EMOJI_STAR = "⭐"  # или ваш ID
+# Эмодзи
 EMOJI_DONE = "✅"
 
 # Логирование
@@ -42,56 +42,63 @@ dp.include_router(router)
 
 # ------------------- БАЗА ДАННЫХ -------------------
 async def init_db():
-    conn = await asyncpg.connect(DB_URL)
+    # Проверка подключения
+    if not DB_URL:
+        logger.error("ОШИБКА: Не указан DB_URL в переменных окружения!")
+        return
+
     try:
-        # Таблица пользователей
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                balance BIGINT DEFAULT 0
-            )
-        """)
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            # Таблица пользователей
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    balance BIGINT DEFAULT 0
+                )
+            """)
 
-        # Таблица реквизитов (новая структура для множественных реквизитов)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS requisites (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                method TEXT, -- 'sbp' или 'card'
-                details TEXT, -- номер
-                bank_name TEXT, -- название банка (для сбп)
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
+            # Таблица реквизитов
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS requisites (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    method TEXT,
+                    details TEXT,
+                    bank_name TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
 
-        # Таблица выводов
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                amount BIGINT,
-                rub_amount BIGINT,
-                details TEXT,
-                user_message_id BIGINT,
-                status TEXT DEFAULT 'wait'
-            )
-        """)
+            # Таблица выводов
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS withdrawals (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    amount BIGINT,
+                    rub_amount BIGINT,
+                    details TEXT,
+                    user_message_id BIGINT,
+                    status TEXT DEFAULT 'wait'
+                )
+            """)
 
-        # Таблица использованных ссылок
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS used_links (
-                link_uuid TEXT PRIMARY KEY
-            )
-        """)
-    finally:
-        await conn.close()
+            # Таблица использованных ссылок
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS used_links (
+                    link_uuid TEXT PRIMARY KEY
+                )
+            """)
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
 
 # --- Функции БД ---
 
 async def get_user_balance(user_id: int) -> int:
     conn = await asyncpg.connect(DB_URL)
     try:
-        # Убедимся, что юзер есть
         await conn.execute("INSERT INTO users (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING", user_id)
         row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
         return row['balance'] if row else 0
@@ -109,7 +116,6 @@ async def add_balance(user_id: int, amount: int):
 async def add_requisite(user_id: int, method: str, details: str, bank_name: str = None):
     conn = await asyncpg.connect(DB_URL)
     try:
-        # Лимит на количество реквизитов (например, 5)
         count = await conn.fetchval("SELECT COUNT(*) FROM requisites WHERE user_id = $1", user_id)
         if count >= 5:
             return False
@@ -204,10 +210,6 @@ class ProfileState(StatesGroup):
     waiting_for_sbp_phone = State()
     waiting_for_sbp_bank = State()
     waiting_for_card = State()
-    confirm_sbp = State()
-
-class WithdrawState(StatesGroup):
-    selecting_requisite = State()
 
 # ------------------- UTIL -------------------
 def generate_code():
@@ -295,10 +297,9 @@ async def inline_query_handler(query: types.InlineQuery):
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, command: CommandObject, state: FSMContext):
     await state.clear()
-    await add_balance(message.from_user.id, 0) # Create user if not exists
+    await add_balance(message.from_user.id, 0) 
     
     args = command.args
-    # Логика оплаты инвойса через диплинк
     if args and args.startswith("inline_pay_"):
         parts = args.split("_")
         if len(parts) >= 4:
@@ -324,7 +325,6 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
                     payload=payload, provider_token="", currency="XTR", prices=prices, start_parameter="pay"
                 )
                 
-                # Уведомляем продавца (беззвучно попытка)
                 merchant_msg_id = None
                 with suppress(Exception):
                     m_msg = await bot.send_message(merchant_id, "⏳ счёт отправлен, ждем оплату..")
@@ -353,7 +353,6 @@ async def open_profile(callback: types.CallbackQuery, state: FSMContext):
     balance = await get_user_balance(user_id)
     rub_balance = int(balance * XTR_TO_RUB_RATE)
     
-    # Получаем список реквизитов
     requisites = await get_user_requisites(user_id)
     
     text = (
@@ -378,14 +377,11 @@ async def open_profile(callback: types.CallbackQuery, state: FSMContext):
             else:
                 label = f"Карта: {r_details}"
             
-            # Кнопка удаления для каждого реквизита
             kb.row(
                 InlineKeyboardButton(text=f"🗑 {label}", callback_data=f"del_req_{r_id}")
             )
 
     text += "\n\nможно добавить несколько карт или номеров"
-    
-    # Кнопки управления
     kb.row(InlineKeyboardButton(text="➕ добавить реквизиты", callback_data="add_payment_details"))
     
     if balance > 0 and requisites:
@@ -395,13 +391,12 @@ async def open_profile(callback: types.CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
-# --- Удаление реквизита ---
 @router.callback_query(F.data.startswith("del_req_"))
 async def delete_req_handler(callback: types.CallbackQuery):
     req_id = int(callback.data.split("_")[2])
     await delete_requisite(req_id, callback.from_user.id)
     await callback.answer("удалено")
-    await open_profile(callback, FSMContext(storage=dp.storage, key=callback.message.chat.id)) # Reload profile
+    await open_profile(callback, FSMContext(storage=dp.storage, key=callback.message.chat.id))
 
 # --- Добавление реквизитов ---
 @router.callback_query(F.data == "add_payment_details")
@@ -425,7 +420,7 @@ async def process_sbp_phone(message: types.Message, state: FSMContext):
     with suppress(Exception): await message.delete()
     phone = normalize_phone(message.text)
     if len(phone) < 10: 
-        return # Можно добавить уведомление об ошибке
+        return 
     
     await state.update_data(sbp_phone=phone)
     await state.set_state(ProfileState.waiting_for_sbp_bank)
@@ -456,8 +451,6 @@ async def process_sbp_bank(message: types.Message, state: FSMContext):
         else:
             await bot.edit_message_text("слишком много реквизитов, удали старые", chat_id=message.chat.id, message_id=msg_id)
         await asyncio.sleep(1.5)
-        # Возврат в профиль
-        # Эмуляция коллбека сложновата тут, проще вызвать функцию
         fake_cb = types.CallbackQuery(id='0', from_user=message.from_user, message=message, chat_instance='0', data='open_profile')
         await open_profile(fake_cb, state)
 
@@ -502,16 +495,13 @@ async def withdraw_start(callback: types.CallbackQuery):
         await callback.answer("сначала добавь реквизиты", show_alert=True)
         return
 
-    # Если реквизит один - сразу на него
     if len(requisites) == 1:
         req = requisites[0]
         await process_withdrawal(callback.message, user_id, req)
     else:
-        # Если несколько - выбор
         kb = InlineKeyboardBuilder()
         for req in requisites:
             label = f"{req['bank_name']} {req['details']}" if req['method'] == 'sbp' else f"Карта {req['details']}"
-            # передаем ID реквизита в callback
             kb.row(InlineKeyboardButton(text=label, callback_data=f"wd_sel_{req['id']}"))
         kb.row(InlineKeyboardButton(text="назад", callback_data="open_profile"))
         await callback.message.edit_text("куда вывести деньги?", reply_markup=kb.as_markup())
@@ -521,7 +511,6 @@ async def withdraw_select_req(callback: types.CallbackQuery):
     req_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     
-    # Ищем выбранный реквизит в базе заново (безопасность)
     conn = await asyncpg.connect(DB_URL)
     req = await conn.fetchrow("SELECT method, details, bank_name FROM requisites WHERE id = $1 AND user_id = $2", req_id, user_id)
     await conn.close()
@@ -533,7 +522,6 @@ async def withdraw_select_req(callback: types.CallbackQuery):
     await process_withdrawal(callback.message, user_id, req)
 
 async def process_withdrawal(message: types.Message, user_id: int, req_data):
-    # Списываем баланс
     amount_stars = await reset_balance_safe(user_id)
     if amount_stars <= 0:
         await message.edit_text("баланс пуст или изменился", reply_markup=back_kb())
@@ -554,7 +542,6 @@ async def process_withdrawal(message: types.Message, user_id: int, req_data):
     msg = await message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     wd_id = await create_withdrawal(user_id, amount_stars, rub_amount, details_str, msg.message_id)
 
-    # Админу
     try:
         user_link = get_user_link(user_id, "пользователь")
         admin_text = (
@@ -586,7 +573,6 @@ async def admin_change_status(callback: types.CallbackQuery):
     
     await update_withdrawal_status(wd_id, action)
     
-    # Обновляем юзеру
     try:
         user_text = (
             "<b>заявка обновлена</b>\n\n"
@@ -599,17 +585,14 @@ async def admin_change_status(callback: types.CallbackQuery):
         )
     except Exception: pass
     
-    # Обновляем админу
     new_kb = admin_withdrawal_kb(action, wd_id)
     lines = callback.message.html_text.split("\n")
-    # Убираем старый статус из сообщения админа, если он там был (простой способ - перезаписать конец)
-    base_text = "\n".join(lines[:4]) # берем первые 4 строки (заголовок, юзер, сумма, реквы)
+    base_text = "\n".join(lines[:4])
     final_text = f"{base_text}\n\nстатус: <b>{adm_st}</b>"
     
     await callback.message.edit_text(final_text, parse_mode="HTML", reply_markup=new_kb)
 
-
-# ------------------- ПРИЕМ ОПЛАТЫ (КОДЫ) -------------------
+# ------------------- ПРИЕМ ОПЛАТЫ -------------------
 @router.callback_query(F.data == "back_to_menu")
 async def back_handler(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -682,9 +665,8 @@ async def send_inv(callback: types.CallbackQuery):
     if not session:
         return await callback.message.edit_text("клиент отключился", reply_markup=main_menu_kb())
     
-    active_sessions[code]["active"] = False # lock code
+    active_sessions[code]["active"] = False 
     
-    # User side
     with suppress(Exception):
         await bot.edit_message_text(
             "тебе выставлен счёт, кнопка внизу 👇", 
@@ -712,7 +694,6 @@ async def cancel_inv(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("отменено", reply_markup=main_menu_kb())
 
-# ------------------- ОПЛАТА -------------------
 @router.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
@@ -728,15 +709,12 @@ async def success_pay(message: types.Message):
 
     data = merchant_transactions[payload]
     
-    # 1. Помечаем ссылку как использованную (если это инлайн)
     if "link_uuid" in data:
         await mark_link_used(data["link_uuid"])
 
-    # 2. Начисляем баланс продавцу
     m_id = data["merchant_id"]
     await add_balance(m_id, amount)
 
-    # 3. Красивое сообщение покупателю
     await message.answer(
         f"<b>оплата прошла успешно</b> {EMOJI_DONE}\nспасибо!",
         message_effect_id=CONFETTI_EFFECT_ID,
@@ -744,7 +722,6 @@ async def success_pay(message: types.Message):
         reply_markup=back_kb()
     )
 
-    # 4. Обновляем экран продавца
     try:
         success_txt = f"оплата получена!\n<b>+{amount} ⭐️</b>"
         if data.get("merchant_msg_id"):
@@ -753,7 +730,6 @@ async def success_pay(message: types.Message):
             await bot.send_message(m_id, success_txt, parse_mode="HTML", reply_markup=main_menu_kb())
     except Exception: pass
 
-    # 5. Чистим сообщения у покупателя
     if data.get("payer_id"):
         with suppress(Exception): await bot.delete_message(chat_id=data["payer_id"], message_id=data.get("prompt_msg_id"))
         with suppress(Exception): await bot.delete_message(chat_id=data["payer_id"], message_id=data.get("inv_msg_id"))
