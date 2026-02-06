@@ -24,12 +24,13 @@ XTR_TO_RUB_RATE = 1.8
 DB_NAME = "bot_database.db"
 CONFETTI_EFFECT_ID = "5046509860389126442"
 CODE_LENGTH = 4
-MIN_WITHDRAWAL_RUB = 100  # Минимальная сумма вывода в рублях
+MIN_WITHDRAWAL_RUB = 10  # Минимальная сумма вывода в рублях
 
 # Эмодзи
 EMOJI_BANK_REQ = "5192678313415434135"  # 🏦 для требования реквизитов
 EMOJI_PHONE = "5409357944619802453"     # 📱 телефон
 EMOJI_T_BANK = "5192689390136089826"    # 🏦 иконка банка (пример)
+EMOJI_CARD = "5192803468762441581"      # Новый премиум эмодзи для карты
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -230,7 +231,7 @@ async def inline_query_handler(query: types.InlineQuery):
     merchant_id = query.from_user.id
     unique_link_id = uuid.uuid4().hex[:12]
     
-    text = f"оплатите счёт на {amount} stars <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji>"
+    text = f"оплатите счёт на {amount} stars <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji>"
     start_param = f"inline_pay_{amount}_{merchant_id}_{unique_link_id}"
     
     kb = InlineKeyboardBuilder()
@@ -239,7 +240,7 @@ async def inline_query_handler(query: types.InlineQuery):
     results = [
         InlineQueryResultArticle(
             id=str(uuid.uuid4()),
-            title=f"отправить счёт на {amount} ⭐",
+            title=f"отправить счёт на {amount} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji>",
             description="нажмите чтобы создать и отправить счёт пользователю",
             input_message_content=InputTextMessageContent(message_text=text, parse_mode="HTML"),
             reply_markup=kb.as_markup(),
@@ -337,19 +338,19 @@ async def show_profile(message: types.Message, user_id: int, is_edit=True):
 
     rub_balance = int(balance * XTR_TO_RUB_RATE)
     
-    text = f"ваш баланс: {balance} <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji> • {rub_balance} ₽\n"
+    text = f"ваш баланс: {balance} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji> • {rub_balance} ₽\n"
     
     kb = InlineKeyboardBuilder()
     
     if not p_number:
-        text += f"для вывода средств добавьте <tg-emoji emoji-id=\"{EMOJI_BANK_REQ}\">🏦</tg-emoji> введите сбп или 💳 карту"
+        text += f"для вывода средств добавьте <tg-emoji emoji-id=\"{EMOJI_BANK_REQ}\">🏦</tg-emoji> сбп или <tg-emoji emoji-id=\"{EMOJI_CARD}\">🏦</tg-emoji> карту"
         kb.row(InlineKeyboardButton(text="добавить реквизиты", callback_data="add_payment_details"))
     else:
         text += "ваши реквизиты:\n<blockquote>"
         if p_method == 'sbp':
-            text += f"сбп • {p_number} • {p_bank}"
+            text += f"<tg-emoji emoji-id=\"{EMOJI_BANK_REQ}\">🏦</tg-emoji> сбп • {p_number} • {p_bank}"
         else:
-            text += f"карта • {p_number}"
+            text += f"<tg-emoji emoji-id=\"{EMOJI_CARD}\">🏦</tg-emoji> карта • {p_number}"
         text += "</blockquote>"
         
         kb.row(InlineKeyboardButton(text="✏️ изменить реквизиты", callback_data="add_payment_details"))
@@ -458,8 +459,8 @@ async def process_card(message: types.Message, state: FSMContext):
         balance = user_data[0]
         rub_balance = int(balance * XTR_TO_RUB_RATE)
         text = (
-            f"ваш баланс: {balance} <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji> • {rub_balance} ₽\n"
-            f"ваши реквизиты:\n<blockquote>карта • {card_num}</blockquote>"
+            f"ваш баланс: {balance} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji> • {rub_balance} ₽\n"
+            f"ваши реквизиты:\n<blockquote><tg-emoji emoji-id=\"{EMOJI_CARD}\">🏦</tg-emoji> карта • {card_num}</blockquote>"
         )
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="✏️ изменить реквизиты", callback_data="add_payment_details"))
@@ -481,7 +482,9 @@ async def withdraw_handler(callback: types.CallbackQuery):
     balance_rub = int(balance_stars * XTR_TO_RUB_RATE)
     
     if balance_rub < MIN_WITHDRAWAL_RUB:
-        await callback.answer(f"Минимальная сумма вывода {MIN_WITHDRAWAL_RUB}₽", show_alert=True)
+        await callback.message.edit_text("вывод доступен только от 10₽", reply_markup=None)
+        await asyncio.sleep(2)
+        await show_profile(callback.message, user_id, is_edit=True)
         return
 
     if p_method == 'sbp':
@@ -502,7 +505,7 @@ async def withdraw_handler(callback: types.CallbackQuery):
     initial_status = "на рассмотрении.. <tg-emoji emoji-id=\"5373153968769735192\">🧐</tg-emoji>"
     text = (
         "<b>заявка принята</b>\n\n"
-        f"сумма: {amount_withdrawn} <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji>\n"
+        f"сумма: {amount_withdrawn} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji>\n"
         f"к получению: {final_rub} ₽\n"
         f"реквизиты: {details_str}\n"
         f"статус:\n<blockquote>{initial_status}</blockquote>"
@@ -518,7 +521,7 @@ async def withdraw_handler(callback: types.CallbackQuery):
             f"<tg-emoji emoji-id=\"5206222720416643915\">🔔</tg-emoji> <b>новая заявка</b> #{wd_id}\n\n"
             f"от: {user_link}\n"
             f"id: <code>{user_id}</code>\n"
-            f"сумма: <b>{amount_withdrawn} ⭐</b> (~{final_rub} ₽)\n"
+            f"сумма: <b>{amount_withdrawn} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji></b> (~{final_rub} ₽)\n"
             f"реквизиты: <code>{details_str}</code>"
         )
         await bot.send_message(
@@ -562,7 +565,7 @@ async def change_status_handler(callback: types.CallbackQuery):
     
     user_text = (
         "<b>заявка принята</b>\n\n"
-        f"сумма: {amount} <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji>\n"
+        f"сумма: {amount} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji>\n"
         f"статус:\n<blockquote>{status_text_user}</blockquote>"
     )
     try:
@@ -659,7 +662,7 @@ async def process_merchant_input(message: types.Message, state: FSMContext):
         except Exception:
             payer_link = "клиенту"
 
-        confirm_text = f"выставить счёт {payer_link} на <b>{amount} <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji></b>?"
+        confirm_text = f"выставить счёт {payer_link} на <b>{amount} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji></b>?"
         await bot.edit_message_text(
             chat_id=message.chat.id, message_id=interface_msg_id,
             text=confirm_text, parse_mode="HTML",
@@ -758,7 +761,7 @@ async def successful_payment(message: types.Message):
         # Убрана строка с балансом
         success_text = (
             f"<tg-emoji emoji-id=\"5206607081334906820\">✅</tg-emoji> <b>счёт оплачен!</b>\n"
-            f"получено: {amount} <tg-emoji emoji-id=\"4983746717313664194\">⭐</tg-emoji>"
+            f"получено: {amount} <tg-emoji emoji-id=\"5384159397263990339\">⭐</tg-emoji>"
         )
         try:
             await bot.edit_message_text(chat_id=m_id, message_id=data["merchant_msg_id"], text=success_text, parse_mode="HTML", reply_markup=await main_menu_kb(m_id))
