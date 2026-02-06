@@ -8,8 +8,8 @@ import uuid
 import os
 from contextlib import suppress
 
-# Если ошибка возникает здесь, значит нужно установить библиотеку: pip install asyncpg
-import asyncpg
+# МЫ ЗАМЕНИЛИ asyncpg НА aiosqlite (работает без сервера)
+import aiosqlite
 
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command, CommandObject
@@ -22,7 +22,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 BOT_USERNAME = os.getenv("BOT_USERNAME")
-DB_URL = os.getenv("DB_URL") 
+# DB_URL больше не нужен, база создастся сама в файле bot.db
+DB_NAME = "bot.db"
 XTR_TO_RUB_RATE = 1.8
 CONFETTI_EFFECT_ID = "5046509860389126442"
 CODE_LENGTH = 4
@@ -40,164 +41,139 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# ------------------- БАЗА ДАННЫХ -------------------
+# ------------------- БАЗА ДАННЫХ (SQLite) -------------------
 async def init_db():
-    # Проверка подключения
-    if not DB_URL:
-        logger.error("ОШИБКА: Не указан DB_URL в переменных окружения!")
-        return
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Таблица пользователей
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                balance INTEGER DEFAULT 0
+            )
+        """)
 
-    try:
-        conn = await asyncpg.connect(DB_URL)
-        try:
-            # Таблица пользователей
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    balance BIGINT DEFAULT 0
-                )
-            """)
+        # Таблица реквизитов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS requisites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                method TEXT,
+                details TEXT,
+                bank_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-            # Таблица реквизитов
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS requisites (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    method TEXT,
-                    details TEXT,
-                    bank_name TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
+        # Таблица выводов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount INTEGER,
+                rub_amount INTEGER,
+                details TEXT,
+                user_message_id INTEGER,
+                status TEXT DEFAULT 'wait'
+            )
+        """)
 
-            # Таблица выводов
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS withdrawals (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    amount BIGINT,
-                    rub_amount BIGINT,
-                    details TEXT,
-                    user_message_id BIGINT,
-                    status TEXT DEFAULT 'wait'
-                )
-            """)
-
-            # Таблица использованных ссылок
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS used_links (
-                    link_uuid TEXT PRIMARY KEY
-                )
-            """)
-        finally:
-            await conn.close()
-    except Exception as e:
-        logger.error(f"Ошибка подключения к БД: {e}")
+        # Таблица использованных ссылок
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS used_links (
+                link_uuid TEXT PRIMARY KEY
+            )
+        """)
+        await db.commit()
 
 # --- Функции БД ---
 
 async def get_user_balance(user_id: int) -> int:
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        await conn.execute("INSERT INTO users (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING", user_id)
-        row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
-        return row['balance'] if row else 0
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+        await db.commit()
+        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 
 async def add_balance(user_id: int, amount: int):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        await conn.execute("INSERT INTO users (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING", user_id)
-        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
 
 async def add_requisite(user_id: int, method: str, details: str, bank_name: str = None):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        count = await conn.fetchval("SELECT COUNT(*) FROM requisites WHERE user_id = $1", user_id)
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT COUNT(*) FROM requisites WHERE user_id = ?", (user_id,)) as cursor:
+            count = (await cursor.fetchone())[0]
+        
         if count >= 5:
             return False
-        await conn.execute(
-            "INSERT INTO requisites (user_id, method, details, bank_name) VALUES ($1, $2, $3, $4)",
-            user_id, method, details, bank_name
+        
+        await db.execute(
+            "INSERT INTO requisites (user_id, method, details, bank_name) VALUES (?, ?, ?, ?)",
+            (user_id, method, details, bank_name)
         )
+        await db.commit()
         return True
-    finally:
-        await conn.close()
 
 async def get_user_requisites(user_id: int):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        rows = await conn.fetch("SELECT id, method, details, bank_name FROM requisites WHERE user_id = $1 ORDER BY id ASC", user_id)
-        return rows
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, method, details, bank_name FROM requisites WHERE user_id = ? ORDER BY id ASC", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return rows
 
 async def delete_requisite(req_id: int, user_id: int):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        await conn.execute("DELETE FROM requisites WHERE id = $1 AND user_id = $2", req_id, user_id)
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("DELETE FROM requisites WHERE id = ? AND user_id = ?", (req_id, user_id))
+        await db.commit()
 
 async def reset_balance_safe(user_id: int) -> int:
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        async with conn.transaction():
-            row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1 FOR UPDATE", user_id)
-            if not row or row['balance'] <= 0:
+    async with aiosqlite.connect(DB_NAME) as db:
+        # SQLite блокирует файл при записи, поэтому транзакция безопасна
+        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or row[0] <= 0:
                 return 0
-            amount = row['balance']
-            await conn.execute("UPDATE users SET balance = 0 WHERE user_id = $1", user_id)
-            return amount
-    finally:
-        await conn.close()
+            amount = row[0]
+        
+        await db.execute("UPDATE users SET balance = 0 WHERE user_id = ?", (user_id,))
+        await db.commit()
+        return amount
 
 async def create_withdrawal(user_id: int, amount: int, rub_amount: int, details: str, message_id: int):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        row = await conn.fetchrow(
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
             """
             INSERT INTO withdrawals (user_id, amount, rub_amount, details, user_message_id, status)
-            VALUES ($1, $2, $3, $4, $5, 'wait')
-            RETURNING id
+            VALUES (?, ?, ?, ?, ?, 'wait')
             """,
-            user_id, amount, rub_amount, details, message_id
+            (user_id, amount, rub_amount, details, message_id)
         )
-        return row['id']
-    finally:
-        await conn.close()
+        await db.commit()
+        return cursor.lastrowid
 
 async def get_withdrawal(wd_id: int):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        return await conn.fetchrow("SELECT user_id, amount, user_message_id, status FROM withdrawals WHERE id = $1", wd_id)
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT user_id, amount, user_message_id, status FROM withdrawals WHERE id = ?", (wd_id,)) as cursor:
+            return await cursor.fetchone()
 
 async def update_withdrawal_status(wd_id: int, new_status: str):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        await conn.execute("UPDATE withdrawals SET status = $1 WHERE id = $2", new_status, wd_id)
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE withdrawals SET status = ? WHERE id = ?", (new_status, wd_id))
+        await db.commit()
 
 async def is_link_used(uuid_str: str) -> bool:
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        row = await conn.fetchrow("SELECT 1 FROM used_links WHERE link_uuid = $1", uuid_str)
-        return bool(row)
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT 1 FROM used_links WHERE link_uuid = ?", (uuid_str,)) as cursor:
+            row = await cursor.fetchone()
+            return bool(row)
 
 async def mark_link_used(uuid_str: str):
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        await conn.execute("INSERT INTO used_links (link_uuid) VALUES ($1) ON CONFLICT DO NOTHING", uuid_str)
-    finally:
-        await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO used_links (link_uuid) VALUES (?)", (uuid_str,))
+        await db.commit()
 
 # ------------------- STATE & RAM -------------------
 active_sessions = {} 
@@ -511,9 +487,10 @@ async def withdraw_select_req(callback: types.CallbackQuery):
     req_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     
-    conn = await asyncpg.connect(DB_URL)
-    req = await conn.fetchrow("SELECT method, details, bank_name FROM requisites WHERE id = $1 AND user_id = $2", req_id, user_id)
-    await conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT method, details, bank_name FROM requisites WHERE id = ? AND user_id = ?", (req_id, user_id)) as cursor:
+            req = await cursor.fetchone()
     
     if not req:
         await callback.answer("ошибка выбора реквизитов", show_alert=True)
