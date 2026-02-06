@@ -1,0 +1,7 @@
+*.pyc
+*.pyo
+*.pyd
+.env
+bot_database.db
+*.log
+venv/
